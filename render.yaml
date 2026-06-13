@@ -4,6 +4,7 @@ services:
     runtime: python
     buildCommand: apt-get update && apt-get install -y ffmpeg && pip install --no-cache-dir -r requirements.txt
     startCommand: python bot.py
+    preDeployCommand: apt-get update && apt-get install -y ffmpeg
     envVars:
       - key: TOKEN
         sync: false
