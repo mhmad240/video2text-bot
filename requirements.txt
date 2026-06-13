@@ -6,6 +6,5 @@ moviepy==1.0.3
 yt-dlp
 deep-translator==1.11.4
 pytube==15.0.0
-av==12.3.0
 torch>=2.0.0
 huggingface-hub>=0.13
