@@ -23,12 +23,7 @@ from telegram.ext import (
 import whisper
 
 # دوال التنسيق
-from businessLogic import (
-    format_text_with_sentences,
-    format_with_timestamps,
-    export_as_srt
-)
-
+# دوال التنسيق - مضمنة في الكود
 # ==================== الإعدادات ====================
 import config
 
