@@ -1,474 +1,355 @@
-# D:\bot_telegram\bot.py
-
-# ==================== المكتبات ====================
-import sys
+# bot.py - Video2Text Telegram Bot
 import os
-import asyncio
 import tempfile
 import logging
-from pathlib import Path
-
-# مكتبات تلجرام
+import whisper
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, filters, ContextTypes
 )
 
-# Whisper
-import whisper
+# ==================== دوال التنسيق ====================
+import re
 
-# دوال التنسيق
-# دوال التنسيق - مضمنة في الكود
+def format_text_with_sentences(text):
+    sentences = re.split(r'([.!?]+\s+)', text)
+    formatted = []
+    current = ""
+    for part in sentences:
+        current += part
+        if re.match(r'[.!?]+\s+', part) or part == sentences[-1]:
+            if current.strip():
+                formatted.append(current.strip())
+            current = ""
+    return "\n".join(formatted)
+
+def format_with_timestamps(segments):
+    lines = []
+    for seg in segments:
+        s = seg['start']
+        h, m = int(s//3600), int((s%3600)//60)
+        sec = int(s%60)
+        lines.append(f"[{h:02d}:{m:02d}:{sec:02d}] {seg['text']}")
+    return "\n".join(lines)
+
+def format_srt_timestamp(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds % 1) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+def export_as_srt(segments):
+    lines = []
+    for i, seg in enumerate(segments, 1):
+        start = format_srt_timestamp(seg['start'])
+        end = format_srt_timestamp(seg['end'])
+        lines.append(str(i))
+        lines.append(f"{start} --> {end}")
+        lines.append(seg['text'])
+        lines.append("")
+    return "\n".join(lines)
+
 # ==================== الإعدادات ====================
 import config
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MAX_VIDEO_SIZE = 50 * 1024 * 1024  # 50 ميجا
+MAX_VIDEO_SIZE = 50 * 1024 * 1024
 WEBSITE_URL = "https://video-2-text-s01.streamlit.app/"
 
-# ==================== تحميل النموذج مسبقاً ====================
+# ==================== النموذج ====================
 model = None
 
 def init_model():
-    """تحميل النموذج عند بدء البوت"""
     global model
-    
     logger.info("🔄 جاري تحميل النموذج...")
     model = whisper.load_model("base")
-    logger.info("✅ تم تحميل النموذج بنجاح وجاهز للعمل")
+    logger.info("✅ النموذج جاهز")
 
-# ==================== تخزين مؤقت للنتائج ====================
+# ==================== تخزين النتائج ====================
 user_results = {}
 
-def save_user_result(user_id, text, segments):
-    user_results[user_id] = {
-        'text': text,
-        'segments': segments
-    }
+def save_result(uid, text, segments):
+    user_results[uid] = {'text': text, 'segments': segments}
 
-def get_user_result(user_id):
-    return user_results.get(user_id, None)
+def get_result(uid):
+    return user_results.get(uid)
 
-def clear_user_result(user_id):
-    if user_id in user_results:
-        del user_results[user_id]
+def clear_result(uid):
+    if uid in user_results:
+        del user_results[uid]
+
+# ==================== أزرار التنسيق ====================
+def get_keyboard():
+    kb = [
+        [InlineKeyboardButton("📝 تنسيق الجمل", callback_data="fmt_sent")],
+        [InlineKeyboardButton("⏱️ عرض Timestamps", callback_data="fmt_time")],
+        [InlineKeyboardButton("📄 أصلي SRT", callback_data="fmt_srt")],
+        [InlineKeyboardButton("🌐 مترجم SRT", callback_data="fmt_srt_en")],
+        [InlineKeyboardButton("🇸🇦 عربي SRT", callback_data="fmt_srt_ar")],
+        [InlineKeyboardButton("📋 نص فقط", callback_data="fmt_text")],
+        [InlineKeyboardButton("🔄 مشروع جديد", callback_data="new"),
+         InlineKeyboardButton("🚪 خروج", callback_data="exit")],
+    ]
+    return InlineKeyboardMarkup(kb)
 
 # ==================== أوامر البوت ====================
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    welcome_text = f"""
-👋 مرحباً {user.first_name}!
+    await update.message.reply_text(f"""
+👋 مرحباً {update.effective_user.first_name}!
 
-🎬 **بوت تحويل الفيديو إلى نص**
+🎬 بوت تحويل الفيديو إلى نص
+📹 أرسل فيديو (حتى 50 ميجا)، ملف صوتي، أو رابط يوتيوب
 
-📹 أرسل فيديو (حتى 50 ميجا) أو رابط يوتيوب
-🎵 أو أرسل ملف صوتي (MP3, WAV, Voice)
-📝 سأقوم باستخراج الصوت وتحويله إلى نص مكتوب
+⚠️ للملفات الأكبر: {WEBSITE_URL}
+""")
 
-⚠️ للملفات الأكبر من 50 ميجا:
-استخدم موقعنا: {WEBSITE_URL}
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"""
+📚 أرسل فيديو/صوت/رابط يوتيوب ثم اختر التنسيق
+⚠️ الحد: 50 ميجا | 🔗 {WEBSITE_URL}
+""")
 
-الأوامر المتاحة:
-/start - البدء
-/help - المساعدة
-/models - النماذج المتاحة
-"""
-    await update.message.reply_text(welcome_text)
+async def models_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🧠 النموذج المستخدم: base (74M)")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = f"""
-📚 **المساعدة**
+# ==================== معالج الأزرار ====================
+async def btn_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    c = q.data
 
-1️⃣ أرسل فيديو مباشرة (MP4, AVI, MOV...)
-2️⃣ أرسل ملف صوتي (MP3, WAV, Voice)
-3️⃣ أو أرسل رابط فيديو يوتيوب
-4️⃣ انتظر حتى اكتمال المعالجة
-5️⃣ اختر تنسيق النص المطلوب
-6️⃣ استلم النص أو ملف الترجمة
-
-⚠️ الحد الأقصى: 50 ميجا
-🔗 للملفات الأكبر: {WEBSITE_URL}
-
-للاستفسار: @mhmad240
-"""
-    await update.message.reply_text(help_text)
-
-async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    models_text = """
-🧠 **النماذج المتاحة:**
-
-• **tiny** - 39M - سريع جداً
-• **base** - 74M - متوازن ✅ (المستخدم حالياً)
-• **small** - 244M - دقة جيدة
-• **medium** - 769M - دقة عالية
-• **large** - 1.5B - الأفضل
-
-📌 البوت يستخدم نموذج **base** للتوازن بين السرعة والدقة
-"""
-    await update.message.reply_text(models_text)
-
-# ==================== أزرار خيارات التنسيق ====================
-
-def get_format_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("📝 تنسيق الجمل", callback_data="format_sentences")],
-        [InlineKeyboardButton("⏱️ عرض Timestamps", callback_data="format_timestamps")],
-        [InlineKeyboardButton("📄 أصلي SRT", callback_data="format_srt_original")],
-        [InlineKeyboardButton("🌐 مترجم SRT", callback_data="format_srt_translated")],
-        [InlineKeyboardButton("🇸🇦 عربي SRT تحميل", callback_data="format_srt_arabic")],
-        [InlineKeyboardButton("📋 نص فقط", callback_data="format_text_only")],
-        [
-            InlineKeyboardButton("🔄 مشروع جديد", callback_data="new_project"),
-            InlineKeyboardButton("🚪 خروج", callback_data="exit")
-        ],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-async def format_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    choice = query.data
-    
-    if choice == "exit":
-        clear_user_result(user_id)
-        await query.edit_message_text("👋 تم إنهاء الجلسة. أرسل فيديو جديد للبدء من جديد.")
+    if c == "exit":
+        clear_result(uid)
+        await q.edit_message_text("👋 تم إنهاء الجلسة")
         return
-    
-    if choice == "new_project":
-        clear_user_result(user_id)
-        await query.edit_message_text("🔄 تم مسح المشروع السابق. أرسل فيديو أو ملف صوتي جديد.")
+    if c == "new":
+        clear_result(uid)
+        await q.edit_message_text("🔄 أرسل ملفاً جديداً")
         return
-    
-    result = get_user_result(user_id)
-    
-    if not result:
-        await query.edit_message_text("❌ انتهت الجلسة. أرسل فيديو جديد للمعالجة.")
+
+    r = get_result(uid)
+    if not r:
+        await q.edit_message_text("❌ انتهت الجلسة")
         return
-    
-    text = result['text']
-    segments = result['segments']
-    
-    if choice == "format_sentences":
-        formatted = format_text_with_sentences(text)
-        await query.edit_message_text("✅ **تنسيق الجمل:**")
-        await send_long_message(query.message, formatted)
-        
-    elif choice == "format_timestamps":
-        if segments and len(segments) > 0:
-            formatted = format_with_timestamps(segments)
-            await query.edit_message_text("✅ **عرض Timestamps:**")
-            await send_long_message(query.message, formatted)
+
+    t, seg = r['text'], r['segments']
+
+    if c == "fmt_sent":
+        await q.edit_message_text("✅ تنسيق الجمل:")
+        await send_long(q.message, format_text_with_sentences(t))
+    elif c == "fmt_time":
+        if seg:
+            await q.edit_message_text("✅ Timestamps:")
+            await send_long(q.message, format_with_timestamps(seg))
         else:
-            await query.answer("⚠️ لا تتوفر بيانات التوقيت", show_alert=True)
+            await q.answer("⚠️ لا تتوفر بيانات التوقيت", show_alert=True)
             return
-            
-    elif choice == "format_srt_original":
-        if segments and len(segments) > 0:
-            srt_content = export_as_srt(segments)
-            await send_srt_file(query, srt_content, "transcript_original.srt", "📄 ملف الترجمة الأصلي (SRT)")
+    elif c == "fmt_srt":
+        if seg:
+            await send_srt(q, export_as_srt(seg), "original.srt", "📄 SRT أصلي")
         else:
-            await query.answer("⚠️ لا تتوفر بيانات الترجمة", show_alert=True)
+            await q.answer("⚠️ لا تتوفر بيانات", show_alert=True)
             return
-            
-    elif choice == "format_srt_translated":
-        if segments and len(segments) > 0:
+    elif c == "fmt_srt_en":
+        if seg:
+            await q.edit_message_text("🌐 جاري الترجمة...")
             try:
-                await query.edit_message_text("🌐 جاري الترجمة...")
                 from deep_translator import GoogleTranslator
-                translator = GoogleTranslator(source='auto', target='en')
-                translated_segments = []
-                for seg in segments:
+                tr = GoogleTranslator(source='auto', target='en')
+                ns = []
+                for s in seg:
                     try:
-                        ts = seg.copy()
-                        ts['text'] = translator.translate(seg['text'])
-                        translated_segments.append(ts)
+                        x = s.copy()
+                        x['text'] = tr.translate(s['text'])
+                        ns.append(x)
                     except:
-                        translated_segments.append(seg)
-                srt_content = export_as_srt(translated_segments)
-                await send_srt_file(query, srt_content, "transcript_translated.srt", "🌐 ملف الترجمة المترجم (SRT)")
+                        ns.append(s)
+                await send_srt(q, export_as_srt(ns), "translated.srt", "🌐 SRT مترجم")
             except Exception as e:
-                await query.edit_message_text(f"❌ فشلت الترجمة: {str(e)}")
+                await q.edit_message_text(f"❌ فشلت الترجمة: {e}")
                 return
         else:
-            await query.answer("⚠️ لا تتوفر بيانات الترجمة", show_alert=True)
+            await q.answer("⚠️ لا تتوفر بيانات", show_alert=True)
             return
-            
-    elif choice == "format_srt_arabic":
-        if segments and len(segments) > 0:
+    elif c == "fmt_srt_ar":
+        if seg:
+            await q.edit_message_text("🇸🇦 جاري الترجمة للعربية...")
             try:
-                await query.edit_message_text("🇸🇦 جاري الترجمة للعربية...")
                 from deep_translator import GoogleTranslator
-                translator = GoogleTranslator(source='auto', target='ar')
-                translated_segments = []
-                for seg in segments:
+                tr = GoogleTranslator(source='auto', target='ar')
+                ns = []
+                for s in seg:
                     try:
-                        ts = seg.copy()
-                        ts['text'] = translator.translate(seg['text'])
-                        translated_segments.append(ts)
+                        x = s.copy()
+                        x['text'] = tr.translate(s['text'])
+                        ns.append(x)
                     except:
-                        translated_segments.append(seg)
-                srt_content = export_as_srt(translated_segments)
-                await send_srt_file(query, srt_content, "transcript_arabic.srt", "🇸🇦 ملف الترجمة العربية (SRT)")
+                        ns.append(s)
+                await send_srt(q, export_as_srt(ns), "arabic.srt", "🇸🇦 SRT عربي")
             except Exception as e:
-                await query.edit_message_text(f"❌ فشلت الترجمة للعربية: {str(e)}")
+                await q.edit_message_text(f"❌ فشلت الترجمة: {e}")
                 return
         else:
-            await query.answer("⚠️ لا تتوفر بيانات الترجمة", show_alert=True)
+            await q.answer("⚠️ لا تتوفر بيانات", show_alert=True)
             return
-            
-    elif choice == "format_text_only":
-        await query.edit_message_text("✅ **النص المستخرج:**")
-        await send_long_message(query.message, text)
-    
-    await query.message.reply_text(
-        "🎨 **اختر تنسيقاً آخر أو أنهِ الجلسة:**",
-        reply_markup=get_format_keyboard()
-    )
+    elif c == "fmt_text":
+        await q.edit_message_text("✅ النص:")
+        await send_long(q.message, t)
 
-async def send_long_message(message, text):
+    await q.message.reply_text("🎨 اختر تنسيقاً آخر:", reply_markup=get_keyboard())
+
+async def send_long(msg, text):
     if len(text) > 4000:
-        parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
-        for part in parts:
-            await message.reply_text(part)
+        for i in range(0, len(text), 4000):
+            await msg.reply_text(text[i:i+4000])
     else:
-        await message.reply_text(text)
+        await msg.reply_text(text)
 
-async def send_srt_file(query, srt_content, filename, caption):
-    srt_path = os.path.join(tempfile.gettempdir(), f"srt_{query.from_user.id}.srt")
-    with open(srt_path, "w", encoding="utf-8") as f:
-        f.write(srt_content)
-    
-    await query.message.reply_document(
-        document=open(srt_path, "rb"),
-        filename=filename,
-        caption=caption
-    )
-    
-    await query.edit_message_text(f"✅ {caption}")
-    
+async def send_srt(q, content, fname, cap):
+    p = os.path.join(tempfile.gettempdir(), f"srt_{q.from_user.id}.srt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(content)
+    await q.message.reply_document(open(p, "rb"), filename=fname, caption=cap)
+    await q.edit_message_text(f"✅ {cap}")
     try:
-        os.remove(srt_path)
+        os.remove(p)
     except:
         pass
 
-# ==================== معالجة الملفات ====================
-
+# ==================== استخراج الصوت ====================
 def extract_audio(video_path):
-    """استخراج الصوت من الفيديو"""
     from moviepy.editor import VideoFileClip
-    
-    temp_dir = tempfile.gettempdir()
-    audio_path = os.path.join(temp_dir, f"{os.path.basename(video_path)}_audio.wav")
-    
-    video_clip = VideoFileClip(video_path)
-    audio_clip = video_clip.audio
-    audio_clip.write_audiofile(audio_path, verbose=False, logger=None)
-    audio_clip.close()
-    video_clip.close()
-    
-    return audio_path
+    out = os.path.join(tempfile.gettempdir(), f"{os.path.basename(video_path)}_audio.wav")
+    clip = VideoFileClip(video_path)
+    clip.audio.write_audiofile(out, verbose=False, logger=None)
+    clip.close()
+    return out
 
-def download_youtube_audio(url):
-    """تحميل الصوت من يوتيوب"""
+def download_yt(url):
     import yt_dlp
-    
-    temp_dir = tempfile.gettempdir()
-    output_path = os.path.join(temp_dir, "youtube_audio_%(id)s.%(ext)s")
-    
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': output_path,
-        'quiet': True,
-        'no_warnings': True,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'wav',
-        }],
-    }
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    d = tempfile.gettempdir()
+    out = os.path.join(d, "yt_%(id)s.%(ext)s")
+    opts = {'format': 'bestaudio/best', 'outtmpl': out, 'quiet': True,
+            'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'}]}
+    with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        video_id = info['id']
-    
-    audio_path = os.path.join(temp_dir, f"youtube_audio_{video_id}.wav")
-    return audio_path
+    return os.path.join(d, f"yt_{info['id']}.wav")
 
-def transcribe_audio(audio_path):
-    """تحويل الصوت إلى نص باستخدام whisper"""
-    result = model.transcribe(audio_path)
-    
-    text = result['text']
-    segments = []
-    for seg in result['segments']:
-        segments.append({
-            'start': seg['start'],
-            'end': seg['end'],
-            'text': seg['text'].strip()
-        })
-    
+def transcribe(path):
+    res = model.transcribe(path)
     return {
-        'text': text,
-        'segments': segments
+        'text': res['text'],
+        'segments': [{'start': s['start'], 'end': s['end'], 'text': s['text'].strip()} for s in res['segments']]
     }
 
-async def process_result(result, user_id, status_msg, message):
-    """معالجة نتيجة التحويل"""
-    text = result['text']
-    segments = result['segments']
-    
-    if text:
-        save_user_result(user_id, text, segments)
-        await status_msg.delete()
-        
-        preview = text[:500] + "..." if len(text) > 500 else text
-        await message.reply_text(f"✅ **تم التحويل بنجاح!**\n\n{preview}")
-        
-        await message.reply_text(
-            "🎨 **اختر تنسيق الإخراج:**",
-            reply_markup=get_format_keyboard()
-        )
+async def proc_result(result, uid, sm, msg):
+    if result['text']:
+        save_result(uid, result['text'], result['segments'])
+        await sm.delete()
+        prev = result['text'][:500] + ("..." if len(result['text']) > 500 else "")
+        await msg.reply_text(f"✅ تم التحويل!\n\n{prev}")
+        await msg.reply_text("🎨 اختر التنسيق:", reply_markup=get_keyboard())
     else:
-        await status_msg.edit_text("❌ لم يتم استخراج أي نص")
+        await sm.edit_text("❌ لم يتم استخراج نص")
 
+# ==================== معالجات الملفات ====================
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    message = update.message
-    video = message.video
-    
-    if video.file_size > MAX_VIDEO_SIZE:
-        await message.reply_text(
-            f"⚠️ حجم الفيديو كبير جداً\n🔗 استخدم موقعنا: {WEBSITE_URL}"
-        )
+    m = update.message
+    v = m.video
+    if v.file_size > MAX_VIDEO_SIZE:
+        await m.reply_text(f"⚠️ حجم كبير\n🔗 {WEBSITE_URL}")
         return
-    
-    status_msg = await message.reply_text("⏳ جاري التحميل...")
-    
+    sm = await m.reply_text("⏳ جاري التحميل...")
     try:
-        await status_msg.edit_text("📥 جاري تحميل الفيديو...")
-        video_file = await context.bot.get_file(video.file_id)
-        
-        temp_video = os.path.join(tempfile.gettempdir(), f"{video.file_unique_id}.mp4")
-        await video_file.download_to_drive(temp_video)
-        
-        await status_msg.edit_text("🎵 جاري استخراج الصوت...")
-        audio_path = extract_audio(temp_video)
-        
-        await status_msg.edit_text("🧠 جاري التحويل إلى نص...")
-        result = transcribe_audio(audio_path)
-        
+        await sm.edit_text("📥 تحميل...")
+        f = await context.bot.get_file(v.file_id)
+        tv = os.path.join(tempfile.gettempdir(), f"{v.file_unique_id}.mp4")
+        await f.download_to_drive(tv)
+        await sm.edit_text("🎵 استخراج الصوت...")
+        ap = extract_audio(tv)
+        await sm.edit_text("🧠 تحويل إلى نص...")
+        res = transcribe(ap)
         try:
-            os.remove(temp_video)
-            os.remove(audio_path)
+            os.remove(tv); os.remove(ap)
         except:
             pass
-        
-        await process_result(result, user.id, status_msg, message)
-        
+        await proc_result(res, update.effective_user.id, sm, m)
     except Exception as e:
-        logger.error(f"خطأ: {e}")
-        await status_msg.edit_text(f"❌ حدث خطأ: {str(e)}")
+        logger.error(str(e))
+        await sm.edit_text(f"❌ خطأ: {e}")
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    message = update.message
-    audio = message.audio or message.voice
-    
-    if audio.file_size > MAX_VIDEO_SIZE:
-        await message.reply_text(f"⚠️ حجم الملف كبير جداً\n🔗 استخدم موقعنا: {WEBSITE_URL}")
+    m = update.message
+    a = m.audio or m.voice
+    if a.file_size > MAX_VIDEO_SIZE:
+        await m.reply_text(f"⚠️ حجم كبير\n🔗 {WEBSITE_URL}")
         return
-    
-    status_msg = await message.reply_text("⏳ جاري التحميل...")
-    
+    sm = await m.reply_text("⏳ جاري التحميل...")
     try:
-        await status_msg.edit_text("📥 جاري تحميل الصوت...")
-        audio_file = await context.bot.get_file(audio.file_id)
-        
-        ext = ".ogg" if message.voice else ".mp3"
-        temp_audio = os.path.join(tempfile.gettempdir(), f"{audio.file_unique_id}{ext}")
-        await audio_file.download_to_drive(temp_audio)
-        
-        await status_msg.edit_text("🧠 جاري التحويل إلى نص...")
-        result = transcribe_audio(temp_audio)
-        
+        await sm.edit_text("📥 تحميل...")
+        f = await context.bot.get_file(a.file_id)
+        ext = ".ogg" if m.voice else ".mp3"
+        ta = os.path.join(tempfile.gettempdir(), f"{a.file_unique_id}{ext}")
+        await f.download_to_drive(ta)
+        await sm.edit_text("🧠 تحويل إلى نص...")
+        res = transcribe(ta)
         try:
-            os.remove(temp_audio)
+            os.remove(ta)
         except:
             pass
-        
-        await process_result(result, user.id, status_msg, message)
-        
+        await proc_result(res, update.effective_user.id, sm, m)
     except Exception as e:
-        logger.error(f"خطأ: {e}")
-        await status_msg.edit_text(f"❌ حدث خطأ: {str(e)}")
+        logger.error(str(e))
+        await sm.edit_text(f"❌ خطأ: {e}")
 
-async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    message = update.message
-    url = message.text.strip()
-    
-    status_msg = await message.reply_text("⏳ جاري معالجة الرابط...")
-    
+async def handle_yt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    m = update.message
+    url = m.text.strip()
+    sm = await m.reply_text("⏳ معالجة الرابط...")
     try:
-        await status_msg.edit_text("📥 جاري تحميل الفيديو من يوتيوب...")
-        audio_path = download_youtube_audio(url)
-        
-        await status_msg.edit_text("🧠 جاري التحويل إلى نص...")
-        result = transcribe_audio(audio_path)
-        
+        await sm.edit_text("📥 تحميل من يوتيوب...")
+        ap = download_yt(url)
+        await sm.edit_text("🧠 تحويل إلى نص...")
+        res = transcribe(ap)
         try:
-            os.remove(audio_path)
+            os.remove(ap)
         except:
             pass
-        
-        await process_result(result, user.id, status_msg, message)
-        
+        await proc_result(res, update.effective_user.id, sm, m)
     except Exception as e:
-        logger.error(f"خطأ: {e}")
-        await status_msg.edit_text(f"❌ حدث خطأ: {str(e)}")
+        logger.error(str(e))
+        await sm.edit_text(f"❌ خطأ: {e}")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if "youtube.com" in text or "youtu.be" in text:
-        await handle_youtube_link(update, context)
+    t = update.message.text.strip()
+    if "youtube.com" in t or "youtu.be" in t:
+        await handle_yt(update, context)
     else:
-        await update.message.reply_text("🎬 أرسل فيديو، ملف صوتي، أو رابط يوتيوب للتحويل إلى نص\nاستخدم /help للمساعدة")
+        await update.message.reply_text("🎬 أرسل فيديو، صوت، أو رابط يوتيوب")
 
-async def error_handler(update, context):
-    error = str(context.error)
-    if "not modified" in error.lower():
-        return
-    logger.error(f"Error: {context.error}")
+async def err_handler(update, context):
+    e = str(context.error)
+    if "not modified" not in e.lower():
+        logger.error(str(context.error))
 
-# ==================== التشغيل ====================
-
+# ==================== رئيسي ====================
 def main():
     init_model()
-    
     app = Application.builder().token(config.TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("models", models_command))
-    app.add_handler(CallbackQueryHandler(format_callback))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("models", models_cmd))
+    app.add_handler(CallbackQueryHandler(btn_handler))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE, handle_audio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_error_handler(error_handler)
-    
-    logger.info("🤖 البوت يعمل الآن...")
+    app.add_error_handler(err_handler)
+    logger.info("🤖 البوت يعمل...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
