@@ -1,0 +1,5 @@
+cd D:\bot_telegram
+echo video2text_env/ > .gitignore
+echo __pycache__/ >> .gitignore
+echo *.pyc >> .gitignore
+echo .env >> .gitignore
