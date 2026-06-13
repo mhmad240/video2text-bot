@@ -2,7 +2,7 @@ services:
   - type: worker
     name: video2text-bot
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: apt-get update && apt-get install -y ffmpeg && pip install --no-cache-dir -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: TOKEN
