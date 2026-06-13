@@ -10,6 +10,8 @@
 | 🌐 تطبيق الويب | [video-2-text-s01.streamlit.app](https://video-2-text-s01.streamlit.app/) |
 | 📂 المستودع | [GitHub](https://github.com/mhmad240/video2text-bot) |
 | 📁 المشروع الأصلي | [video-2-text](https://github.com/mhmad240/video-2-text) |
+| 🌐 تطبيق الويب | [Railway](https://railway.com/dashboard) |
+| 🌐 تطبيق الويب | [المطور](https://github.com/mhmad240) |
 
 ## ✨ الميزات
 
@@ -39,7 +41,7 @@ TOKEN = "توكن_البوت_هنا"
 bash
 python bot.py
 🖥️ النشر على السيرفر
-المشروع جاهز للنشر على Railway باستخدام Dockerfile المرفق.
+المشروع جاهز للنشر على **Railway** باستخدام Dockerfile المرفق.
 
 🧠 النموذج
 يستخدم openai-whisper بنموذج tiny (39M) للذاكرة المحدودة. يمكن تغييره إلى base أو small محلياً.
