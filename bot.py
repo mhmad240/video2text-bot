@@ -66,7 +66,7 @@ model = None
 def init_model():
     global model
     logger.info("🔄 جاري تحميل النموذج...")
-    model = whisper.load_model("base")
+    model = whisper.load_model("tiny")
     logger.info("✅ النموذج جاهز")
 
 # ==================== تخزين النتائج ====================
